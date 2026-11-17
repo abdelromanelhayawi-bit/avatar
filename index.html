@@ -13,24 +13,59 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;transi
 #in{flex:1;font-size:16px;padding:12px 14px;border-radius:24px;border:0;background:var(--card);color:var(--fg);min-width:0}
 button{border:0;border-radius:50%;width:48px;height:48px;font-size:20px;background:var(--acc);color:#fff}
 button.rec{background:#d22;animation:p 1s infinite}@keyframes p{50%{opacity:.6}}
+#setup{position:fixed;inset:0;background:#000d;display:none;align-items:center;justify-content:center;padding:20px;z-index:9}
+#setup div{background:var(--card);border-radius:18px;padding:18px;width:100%;max-width:420px;line-height:1.7}
+#setup input{width:100%;box-sizing:border-box;font-size:15px;padding:10px;margin:4px 0 10px;border-radius:10px;border:0;background:#0006;color:#fff}
+#setup button{width:100%;border-radius:12px;height:44px;font-size:16px}
 </style></head><body>
 <div id="stage"><video id="vi" src="idle.mp4" muted playsinline autoplay loop></video><video id="vr" src="ret.mp4" muted playsinline preload="auto"></video><video id="vt" src="talk.mp4" muted playsinline preload="auto"></video><div id="cap"></div><div id="st"></div></div>
-<div id="bar"><input id="in" placeholder="اكتب أو اضغط الميكروفون" enterkeyhint="send"><button id="mic">🎤</button><button id="go">➤</button></div>
+<div id="bar"><input id="in" placeholder="اكتب أو اضغط الميكروفون" enterkeyhint="send"><button id="cfg">⚙</button><button id="mic">🎤</button><button id="go">➤</button></div>
+<div id="setup"><div>
+<b>الإعداد (مرة واحدة)</b><br>المفاتيح بتتحفظ على موبايلك بس، ومش بتتبعت لأي حد غير Fish وGoogle.
+<label>مفتاح Fish Audio</label><input id="kf" type="password" autocomplete="off">
+<label>مفتاح Gemini (Google AI Studio)</label><input id="kg" type="password" autocomplete="off">
+<button id="ks">حفظ</button></div></div>
 <script>
+const VOICE='ac76ad7ffc79413fbb7f389e7eb9e489';
+const SYS='أنت مساعد صوتي ودود اسمك عبدالرحمن. رد بنفس لغة ولهجة المستخدم (لو كلمك بالمصري رد بالمصري)، بجملتين أو ثلاث كحد أقصى كأنك في مكالمة فيديو، وبأسلوب شبابي دافئ، بدون رموز أو قوائم أو إيموجي.';
 const $=id=>document.getElementById(id),vi=$('vi'),vr=$('vr'),vt=$('vt'),cap=$('cap'),inp=$('in');
 addEventListener('error',e=>{$('st').textContent='خطأ: '+e.message});
-let state='idle',tok=0,cur=null,code='';try{code=localStorage.getItem('code')||''}catch(e){}
+const ls={get:k=>{try{return localStorage.getItem(k)||''}catch(e){return ''}},set:(k,v)=>{try{localStorage.setItem(k,v)}catch(e){}}};
+let FISH=ls.get('fish'),GEM=ls.get('gem');
+const openSetup=()=>{$('kf').value=FISH;$('kg').value=GEM;$('setup').style.display='flex';};
+$('cfg').onclick=openSetup;
+$('ks').onclick=()=>{FISH=$('kf').value.trim();GEM=$('kg').value.trim();ls.set('fish',FISH);ls.set('gem',GEM);ls.set('gmodel','');$('setup').style.display='none';};
+if(!FISH||!GEM)openSetup();
+let state='idle',tok=0,cur=null;
 const show=v=>[vi,vr,vt].forEach(e=>e.style.opacity=e===v?1:0);show(vi);
 function startTalk(){if(state==='talk')return;state='talk';vr.pause();vt.currentTime=0;vt.play().catch(()=>{});show(vt);}
 function stopTalk(){if(state!=='talk')return;state='ret';vt.pause();vr.currentTime=0;vr.play().catch(()=>{});show(vr);}
 vr.onended=()=>{if(state==='ret'){state='idle';vi.currentTime=0;vi.play().catch(()=>{});show(vi);}};
 (function f(){requestAnimationFrame(f);if(state==='talk'&&(vt.currentTime>9.95||vt.ended)){vt.currentTime=1.8;vt.play().catch(()=>{});}})();
-async function api(path,body,retry=true){
-  const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','x-code':code},body:JSON.stringify(body)});
-  if(r.status===401&&retry){code=prompt('أدخل كلمة السر')||'';try{localStorage.setItem('code',code)}catch(e){}return api(path,body,false);}
-  if(!r.ok)throw new Error(path+' '+r.status);return r;
+async function gemModel(){
+  let m=ls.get('gmodel');if(m)return m;
+  const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key='+GEM);
+  if(!r.ok)throw new Error('gemini '+r.status);
+  const c=((await r.json()).models||[]).filter(x=>(x.supportedGenerationMethods||[]).includes('generateContent')&&/^models\/gemini-[\d.]+-flash(-lite)?$/.test(x.name));
+  const v=x=>parseFloat(x.name.match(/gemini-([\d.]+)/)[1]);
+  c.sort((a,b)=>v(b)-v(a)||(a.name.includes('lite')?1:-1));
+  if(!c.length)throw new Error('no gemini model');
+  m=c[0].name.replace('models/','');ls.set('gmodel',m);return m;
 }
-function fallbackSpeak(text,my,fin){
+async function chat(hist){
+  const m=await gemModel();
+  const body={systemInstruction:{parts:[{text:SYS}]},contents:hist.slice(-12).map(h=>({role:h.role==='assistant'?'model':'user',parts:[{text:h.content}]})),generationConfig:{maxOutputTokens:800}};
+  const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+m+':generateContent?key='+GEM,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if(!r.ok){if(r.status===404)ls.set('gmodel','');throw new Error('gemini '+r.status);}
+  const j=await r.json();
+  return (((j.candidates||[])[0]||{}).content&&j.candidates[0].content.parts||[]).map(p=>p.text||'').join('').trim()||'...';
+}
+async function tts(text){
+  const r=await fetch('https://api.fish.audio/v1/tts',{method:'POST',headers:{'Authorization':'Bearer '+FISH,'Content-Type':'application/json','model':'s2.1-pro-free'},body:JSON.stringify({text:text.slice(0,600),reference_id:VOICE,format:'mp3'})});
+  if(!r.ok)throw new Error('fish '+r.status);
+  return URL.createObjectURL(await r.blob());
+}
+function fallbackSpeak(text,fin){
   if(!window.speechSynthesis){setTimeout(fin,Math.min(text.length*70,20000)+600);return;}
   startTalk();speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(text);u.lang='ar-EG';u.onend=u.onerror=fin;speechSynthesis.speak(u);
 }
@@ -38,22 +73,23 @@ async function speak(text){
   const my=++tok,fin=()=>{if(my===tok)stopTalk();};
   try{
     $('st').textContent='';
-    const url=URL.createObjectURL(await (await api('/api/tts',{text})).blob());
-    if(my!==tok)return;
-    const a=new Audio(url);cur=a;a.onended=fin;
-    a.onerror=()=>{fin();$('st').textContent='تعذر تشغيل الصوت'};
+    const url=await tts(text);if(my!==tok)return;
+    const a=new Audio(url);cur=a;a.onended=fin;a.onerror=()=>{fin();$('st').textContent='تعذر تشغيل الصوت'};
     startTalk();
-    setTimeout(()=>{if(my===tok)a.play().catch(()=>{fin();$('st').textContent='اضغط على الشاشة ثم جرّب مرة أخرى'});},400);
-  }catch(e){$('st').textContent='صوتك غير متاح ('+e.message+') — استخدمت صوت الجهاز';fallbackSpeak(text,my,fin);}
+    setTimeout(()=>{if(my===tok)a.play().catch(()=>{fin();$('st').textContent='اضغط على الشاشة ثم جرّب تاني'});},400);
+  }catch(e){
+    const cors=/Failed to fetch|NetworkError/i.test(e.message);
+    $('st').textContent='صوتك مش متاح ('+(cors?'المتصفح منع الاتصال بـ Fish':e.message)+') — استخدمت صوت الجهاز';
+    fallbackSpeak(text,fin);
+  }
 }
 const hist=[];let busy=false;
 async function ask(q){
-  if(!q.trim()||busy)return;busy=true;inp.value='';
-  cap.style.display='block';cap.textContent='...';hist.push({role:'user',content:q});
-  try{
-    const j=await (await api('/api/chat',{messages:hist})).json();
-    hist.push({role:'assistant',content:j.reply});cap.textContent=j.reply;speak(j.reply);
-  }catch(e){cap.textContent='خطأ: '+e.message;hist.pop();}
+  if(!q.trim()||busy)return;
+  if(!FISH||!GEM){openSetup();return;}
+  busy=true;inp.value='';cap.style.display='block';cap.textContent='...';hist.push({role:'user',content:q});
+  try{const a=await chat(hist);hist.push({role:'assistant',content:a});cap.textContent=a;speak(a);}
+  catch(e){cap.textContent='خطأ: '+e.message;hist.pop();}
   busy=false;
 }
 $('go').onclick=()=>ask(inp.value);
